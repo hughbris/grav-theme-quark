@@ -1,0 +1,95 @@
+name: Compile SCSS to CSS and Upload Archive
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - "scss/**"
+      - ".github/workflows/compile-scss-to-css.yml"
+
+jobs:
+  build-and-archive:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Install dependencies
+        run: |
+          npm install sass fs-extra glob
+
+      - name: Compile SCSS to CSS with variable conversion
+        run: |
+          mkdir -p scripts
+          cat > scripts/compile-scss-to-css.js <<'EOF'
+          const sass = require('sass');
+          const glob = require('glob');
+          const fs = require('fs-extra');
+          const path = require('path');
+
+          // Extract SCSS variables from main _variables.scss
+          const varsFile = 'scss/theme/_variables.scss';
+          const varsContent = fs.readFileSync(varsFile, 'utf8');
+          const varRegex = /^\$([a-zA-Z0-9-_]+):\s*([^;]+)!?default?;/gm;
+          let match, variables = {};
+          while ((match = varRegex.exec(varsContent)) !== null) {
+            variables[match[1]] = match[2].trim();
+          }
+
+          // Build CSS custom properties block
+          let cssVars = ':root {\n';
+          Object.entries(variables).forEach(([name, value]) => {
+            cssVars += `  --${name.replace(/_/g, "-")}: ${value};\n`;
+          });
+          cssVars += '}\n\n';
+
+          // Find all entry SCSS files (not partials)
+          const scssFiles = glob.sync('scss/**/*.scss').filter(
+            f => !path.basename(f).startsWith('_')
+          );
+          const outputRoot = 'css-compiled';
+
+          for (const srcPath of scssFiles) {
+            const cssOutPath = path.join(
+              outputRoot,
+              path.relative('scss', srcPath).replace(/\.scss$/, '.css')
+            );
+            fs.ensureDirSync(path.dirname(cssOutPath));
+            let result = sass.compile(srcPath, { style: 'expanded' });
+            let css = result.css;
+
+            // Replace SCSS variable usage with CSS variables
+            Object.keys(variables).forEach(scssVar => {
+              // $primary-color -> var(--primary-color)
+              css = css.replace(
+                new RegExp(`\\$${scssVar}\\b`, 'g'),
+                `var(--${scssVar.replace(/_/g, "-")})`
+              );
+            });
+
+            // Prepend :root block to the main files
+            if (/quark\.scss$|theme\.scss$|spectre\.scss$|spectre-exp\.scss$|spectre-icons\.scss$/.test(srcPath)) {
+              css = cssVars + css;
+            }
+
+            fs.writeFileSync(cssOutPath, css, 'utf8');
+          }
+          EOF
+
+          node scripts/compile-scss-to-css.js
+
+      - name: Create tar.gz archive of compiled CSS
+        run: |
+          tar -czvf css-compiled.tar.gz css-compiled
+
+      - name: Upload CSS archive as artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: css-compiled
+          path: css-compiled.tar.gz

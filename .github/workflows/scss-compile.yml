@@ -1,0 +1,91 @@
+name: SCSS to CSS with Variable Conversion
+
+on:
+  push:
+    paths:
+      - '**/*.scss'
+  pull_request:
+    paths:
+      - '**/*.scss'
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        shell: bash
+
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Install dependencies
+        run: |
+          npm init -y
+          npm install sass
+
+      - name: Compile SCSS to expanded CSS
+        run: |
+          mkdir -p css_output
+          find . -type f -name "*.scss" | while read -r file; do
+            out="css_output/${file#./}"
+            out="${out%.scss}.css"
+            mkdir -p "$(dirname "$out")"
+            npx sass --style=expanded "$file" "$out"
+          done
+
+      - name: Convert SCSS variables to CSS variables
+        run: |
+          # Requires GNU awk. This converts $var to --var in :root and usage.
+          find css_output -type f -name "*.css" | while read -r file; do
+            awk '
+              BEGIN { in_root=0 }
+              /^\s*\$[a-zA-Z0-9_-]+\s*:/ {
+                # Convert variable definition
+                sub(/^\s*\$/, "  --")
+                sub(/:/, ":")
+                if (!in_root) {
+                  print ":root {" > file".tmp"
+                  in_root=1
+                }
+                print $0 > file".tmp"
+                next
+              }
+              {
+                line=$0
+                while (match(line, /\$[a-zA-Z0-9_-]+/)) {
+                  var=substr(line, RSTART+1, RLENGTH-1)
+                  line=substr(line, 1, RSTART-1) "var(--" var ")" substr(line, RSTART+RLENGTH)
+                }
+                if (in_root) {
+                  print "}" > file".tmp"
+                  in_root=0
+                }
+                print line > file".out"
+              }
+            ' file="$file" "$file"
+            if [ -f "$file.tmp" ]; then
+              # Prepend :root block
+              cat "$file.tmp" "$file.out" > "$file.new"
+              rm "$file.tmp" "$file.out"
+            else
+              mv "$file.out" "$file.new"
+            fi
+            mv "$file.new" "$file"
+          done
+
+      - name: Archive CSS output
+        run: |
+          cd css_output
+          zip -r ../css-output.zip .
+
+      - name: Upload CSS artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: css-output
+          path: css-output.zip
